@@ -1,0 +1,18 @@
+FROM golang:1.18-alpine as kexec
+RUN apk add --no-cache git ca-certificates gcc linux-headers musl-dev
+COPY kexec/v1 /go/src/github.com/tinkerbell/hub/actions/kexec/v1
+COPY common /go/src/github.com/tinkerbell/hub/actions/common
+COPY go.mod /go/src/github.com/tinkerbell/hub/actions/go.mod
+COPY go.sum /go/src/github.com/tinkerbell/hub/actions/go.sum
+WORKDIR /go/src/github.com/tinkerbell/hub/actions
+RUN GOPRIVATE=github.com/tinkerbell/\*,github.com/platinasystems/\* go mod download
+WORKDIR /go/src/github.com/tinkerbell/hub/actions/kexec/v1
+ENV GO111MODULE=on
+RUN --mount=type=cache,sharing=locked,id=gomod,target=/go/pkg/mod/cache \
+    --mount=type=cache,sharing=locked,id=goroot,target=/root/.cache/go-build \
+    CGO_ENABLED=1 GOOS=linux go build -a -ldflags "-linkmode external -extldflags '-static' -s -w" -o kexec
+
+# Build final image
+FROM scratch
+COPY --from=kexec /go/src/github.com/tinkerbell/hub/actions/kexec/v1/kexec .
+ENTRYPOINT ["/kexec"]

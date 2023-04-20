@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"github.com/tinkerbell/hub/actions/common"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -27,20 +28,45 @@ var kexecCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Parse the environment variables that are passed into the action
 		blockDevice := os.Getenv("BLOCK_DEVICE")
+		diskId := os.Getenv("DEST_DISK_ID")
+		diskSN := os.Getenv("DEST_DISK_SN")
 		filesystemType := os.Getenv("FS_TYPE")
 		kernelPath := os.Getenv("KERNEL_PATH")
 		initrdPath := os.Getenv("INITRD_PATH")
 		cmdLine := os.Getenv("CMD_LINE")
 
-		// These two strings contain the updated paths including the mountAction path
-		var kernelMountPath, initrdMountPath string
+		var (
+			kernelMountPath, initrdMountPath string // These two strings contain the updated paths including the mountAction path
+			disk                             string
+			err                              error
+		)
+
+		if diskId != "" {
+			if disk, err = common.GetDiskByID(diskId); err != nil {
+				log.Fatal(err)
+				return
+			}
+		} else if diskSN != "" {
+			if disk, err = common.GetDiskBySN(diskSN); err != nil {
+				log.Fatal(err)
+				return
+			}
+		}
+		if disk != "" {
+			part := fmt.Sprintf("%s1", disk)
+			if _, err = os.Stat(part); os.IsNotExist(err) {
+				log.Fatal(err)
+				return
+			}
+			blockDevice = part
+		}
 
 		if blockDevice == "" {
 			log.Fatalf("No Block Device speified with Environment Variable [BLOCK_DEVICE]")
 		}
 
 		// Create the /mountAction mountpoint (no folders exist previously in scratch container)
-		err := os.Mkdir(mountAction, os.ModeDir)
+		err = os.Mkdir(mountAction, os.ModeDir)
 		if err != nil {
 			log.Fatalf("Error creating the action Mountpoint [%s]", mountAction)
 		}
@@ -57,7 +83,10 @@ var kexecCmd = &cobra.Command{
 		if kernelPath == "" {
 			grubFile, err := ioutil.ReadFile(fmt.Sprintf("%s/boot/grub/grub.cfg", mountAction))
 			if err != nil {
-				log.Fatal(err)
+				grubFile, err = ioutil.ReadFile(fmt.Sprintf("%s/boot/grub/grub.conf", mountAction))
+				if err != nil {
+					log.Fatal(err)
+				}
 			}
 			bootConfig := grub.GetDefaultConfig(string(grubFile))
 			if bootConfig == nil {
