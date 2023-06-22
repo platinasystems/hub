@@ -1,11 +1,19 @@
 package common
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/platinasystems/go-common/v2/base"
+	log2 "github.com/platinasystems/go-common/v2/logs"
+	"github.com/platinasystems/go-common/v2/process"
+	utility "github.com/platinasystems/go-common/v2/utilities"
+	"github.com/platinasystems/go-common/v2/utils"
 	"github.com/platinasystems/scsi"
+	"github.com/platinasystems/tiles/pccserver/models"
+	"github.com/platinasystems/tiles/systemCollector/smart"
 	log "github.com/sirupsen/logrus"
-	"io/fs"
-	"io/ioutil"
+	"github.com/spf13/afero"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +21,27 @@ import (
 )
 
 const blockPath = "/sys/class/block/"
+
+var (
+	ps       process.Service
+	fsRef    afero.Fs
+	selector *driveSelector
+)
+
+type driveSelector struct {
+	smartStatGatherer *smart.SmartctlGatherer
+}
+
+func init() {
+	log2.InitWithDefault(nil)
+
+	ps = &process.OSProcessService{}
+	fsRef = afero.NewOsFs()
+
+	selector = &driveSelector{
+		smartStatGatherer: smart.NewSmartctlGatherer(ps, fsRef),
+	}
+}
 
 func GetDiskByID(diskId string) (disk string, err error) {
 	var (
@@ -110,8 +139,8 @@ func extractDeviceID(diskId string) string {
 }
 
 func getDrivesNames() (DrivesNames map[string]struct{}, err error) {
-	var blockDevices []fs.FileInfo
-	blockDevices, err = ioutil.ReadDir(blockPath)
+	var blockDevices []os.DirEntry
+	blockDevices, err = os.ReadDir(blockPath)
 	if err != nil {
 		err = fmt.Errorf("cannot read %v: %v", blockPath, err)
 		return
@@ -130,7 +159,7 @@ func getDrivesNames() (DrivesNames map[string]struct{}, err error) {
 
 func readFileContent(paths ...string) string {
 	path := filepath.Join(paths...)
-	b, _ := ioutil.ReadFile(path)
+	b, _ := os.ReadFile(path)
 	return strings.TrimSpace(string(b))
 }
 
@@ -140,7 +169,7 @@ func GetIsciId(device string) (ids []string, sn string, err error) {
 		err = e
 		return
 	}
-	defer dev.Close()
+	defer func() { _ = dev.Close() }()
 
 	pages, e := dev.VPDs()
 	if e != nil {
@@ -171,4 +200,83 @@ func GetIsciId(device string) (ids []string, sn string, err error) {
 		}
 	}
 	return
+}
+
+// GetDiskByLogicalID returns device path for a given drive specified with a logical composite identifier
+func GetDiskByLogicalID(logicalDriveIDJSON string) (disk string, err error) {
+
+	driveIn := &models.LogicalDriveID{}
+	err = json.Unmarshal([]byte(logicalDriveIDJSON), driveIn)
+	if utils.IsNotNull(err) {
+		return
+	}
+
+	path, ch := selector.getDrivePath(driveIn)
+	if utils.IsNull(ch) {
+		if utility.StringIsBlank(path) {
+			log2.AuctaLogger.Infof("drive %s not found", driveIn.String())
+		} else {
+			log2.AuctaLogger.Infof("drive %s has path: %q", driveIn.String(), path)
+		}
+	} else {
+		log2.AuctaLogger.Infof(ch.Message())
+	}
+
+	return
+}
+
+func (selector *driveSelector) getDrivePath(in *models.LogicalDriveID) (path string, ch base.CodeHolder) {
+
+	drives, err := selector.smartStatGatherer.Scan()
+	if utils.IsNotNull(err) {
+		ch = base.BuildCodeHolder(err, fmt.Sprintf("smartctl error: %s", err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	if utils.IsNotNull(in) {
+		for _, singleInput := range in.PhysicalDriveIDs {
+
+			for _, drive := range drives {
+
+				if utility.StringIsNotBlank(singleInput.WWID) {
+					if len(drive.Addresses) > 0 {
+
+						log2.AuctaLogger.Infof("comparing %q and list %q", singleInput.WWID, drive.Addresses)
+						if utils.Contains(drive.Addresses, strings.ToLower(singleInput.WWID)) {
+							log2.AuctaLogger.Info("matched a SAS address")
+							path = fmt.Sprintf("/dev/%s", drive.Name)
+							return
+						}
+
+					} else {
+						wwid := drive.WWID
+						log2.AuctaLogger.Infof("comparing %q and %q", singleInput.WWID, wwid)
+						// maybe WWID could be fetched from /sys/block/sd*/device/wwid too, before trying the partial match
+						if strings.EqualFold(singleInput.WWID, wwid) || partialWWIDMatch(wwid, singleInput.WWID) {
+							path = fmt.Sprintf("/dev/%s", drive.Name)
+							return
+						}
+					}
+				}
+
+				// wwid and serial are not mutually exclusive: first match is OK
+				if utility.StringIsNotBlank(singleInput.Serial) {
+					// looking for a drive by serial number
+					serialNumber := drive.SerialNumber
+					log2.AuctaLogger.Infof("comparing %q and %q", singleInput.Serial, serialNumber)
+					if strings.EqualFold(singleInput.Serial, serialNumber) {
+						path = fmt.Sprintf("/dev/%s", drive.Name)
+						return
+					}
+				}
+			}
+		}
+	}
+
+	return
+}
+
+func partialWWIDMatch(wwn string, wwid string) bool {
+	log2.AuctaLogger.Infof("comparing %q and %q", wwid[:len(wwid)-1], wwn[:len(wwn)-1])
+	return len(wwn) > 0 && len(wwid) > 0 && strings.EqualFold(wwid[:len(wwid)-1], wwn[:len(wwn)-1])
 }
