@@ -30,6 +30,7 @@ var (
 
 type driveSelector struct {
 	smartStatGatherer *smart.SmartctlGatherer
+	allDrives         []*models.Drive
 }
 
 func init() {
@@ -205,18 +206,18 @@ func GetIsciId(device string) (ids []string, sn string, err error) {
 // GetDiskByLogicalID returns device path for a given drive specified with a logical composite identifier
 func GetDiskByLogicalID(logicalDriveIDJSON string) (disk string, err error) {
 
-	driveIn := &models.LogicalDriveID{}
-	err = json.Unmarshal([]byte(logicalDriveIDJSON), driveIn)
+	driveIn := make([]*models.LogicalDriveID, 0)
+	err = json.Unmarshal([]byte(logicalDriveIDJSON), &driveIn)
 	if utils.IsNotNull(err) {
 		return
 	}
 
-	path, ch := selector.getDrivePath(driveIn)
+	paths, ch := selector.getCompositeDrivePath(driveIn)
 	if utils.IsNull(ch) {
-		if utility.StringIsBlank(path) {
-			log2.AuctaLogger.Infof("drive %s not found", driveIn.String())
+		if len(paths) > 0 {
+			log2.AuctaLogger.Infof("drive composed by %d has paths: %q", len(driveIn), paths)
 		} else {
-			log2.AuctaLogger.Infof("drive %s has path: %q", driveIn.String(), path)
+			log2.AuctaLogger.Infof("drive composed by %d not found", len(driveIn))
 		}
 	} else {
 		log2.AuctaLogger.Infof(ch.Message())
@@ -225,49 +226,71 @@ func GetDiskByLogicalID(logicalDriveIDJSON string) (disk string, err error) {
 	return
 }
 
-func (selector *driveSelector) getDrivePath(in *models.LogicalDriveID) (path string, ch base.CodeHolder) {
+func (selector *driveSelector) getCompositeDrivePath(in []*models.LogicalDriveID) (paths []string, ch base.CodeHolder) {
+	if utils.IsNull(in) {
+		return
+	}
 
 	drives, err := selector.smartStatGatherer.Scan()
 	if utils.IsNotNull(err) {
 		ch = base.BuildCodeHolder(err, fmt.Sprintf("smartctl error: %s", err.Error()), http.StatusInternalServerError)
 		return
 	}
+	selector.allDrives = drives
 
-	if utils.IsNotNull(in) {
-		for _, singleInput := range in.PhysicalDriveIDs {
+	paths = make([]string, 0)
 
-			for _, drive := range drives {
+	var path string
+	for _, singleInput := range in {
+		path, ch = selector.getDrivePath(singleInput)
+		if utils.IsNotNull(ch) {
+			paths = nil
+			return
+		}
+		log2.AuctaLogger.Infof("drive %s has path: %q", singleInput.String(), path)
+		paths = append(paths, path)
+	}
+	return
+}
 
-				if utility.StringIsNotBlank(singleInput.WWID) {
-					if len(drive.Addresses) > 0 {
+func (selector *driveSelector) getDrivePath(in *models.LogicalDriveID) (path string, ch base.CodeHolder) {
+	if utils.IsNull(in) || len(selector.allDrives) == 0 {
+		return
+	}
 
-						log2.AuctaLogger.Infof("comparing %q and list %q", singleInput.WWID, drive.Addresses)
-						if utils.Contains(drive.Addresses, strings.ToLower(singleInput.WWID)) {
-							log2.AuctaLogger.Info("matched a SAS address")
-							path = fmt.Sprintf("/dev/%s", drive.Name)
-							return
-						}
+	for _, singleInput := range in.PhysicalDriveIDs {
 
-					} else {
-						wwid := drive.WWID
-						log2.AuctaLogger.Infof("comparing %q and %q", singleInput.WWID, wwid)
-						// maybe WWID could be fetched from /sys/block/sd*/device/wwid too, before trying the partial match
-						if strings.EqualFold(singleInput.WWID, wwid) || partialWWIDMatch(wwid, singleInput.WWID) {
-							path = fmt.Sprintf("/dev/%s", drive.Name)
-							return
-						}
-					}
-				}
+		for _, drive := range selector.allDrives {
 
-				// wwid and serial are not mutually exclusive: first match is OK
-				if utility.StringIsNotBlank(singleInput.Serial) {
-					// looking for a drive by serial number
-					serialNumber := drive.SerialNumber
-					log2.AuctaLogger.Infof("comparing %q and %q", singleInput.Serial, serialNumber)
-					if strings.EqualFold(singleInput.Serial, serialNumber) {
+			if utility.StringIsNotBlank(singleInput.WWID) {
+				if len(drive.Addresses) > 0 {
+
+					log2.AuctaLogger.Infof("comparing %q and list %q", singleInput.WWID, drive.Addresses)
+					if utils.Contains(drive.Addresses, strings.ToLower(singleInput.WWID)) {
+						log2.AuctaLogger.Info("matched a SAS address")
 						path = fmt.Sprintf("/dev/%s", drive.Name)
 						return
 					}
+
+				} else {
+					wwid := drive.WWID
+					log2.AuctaLogger.Infof("comparing %q and %q", singleInput.WWID, wwid)
+					// maybe WWID could be fetched from /sys/block/sd*/device/wwid too, before trying the partial match
+					if strings.EqualFold(singleInput.WWID, wwid) || partialWWIDMatch(wwid, singleInput.WWID) {
+						path = fmt.Sprintf("/dev/%s", drive.Name)
+						return
+					}
+				}
+			}
+
+			// wwid and serial are not mutually exclusive: first match is OK
+			if utility.StringIsNotBlank(singleInput.Serial) {
+				// looking for a drive by serial number
+				serialNumber := drive.SerialNumber
+				log2.AuctaLogger.Infof("comparing %q and %q", singleInput.Serial, serialNumber)
+				if strings.EqualFold(singleInput.Serial, serialNumber) {
+					path = fmt.Sprintf("/dev/%s", drive.Name)
+					return
 				}
 			}
 		}
