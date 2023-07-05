@@ -6,6 +6,10 @@ COPY go.mod /go/src/github.com/tinkerbell/hub/actions/go.mod
 COPY go.sum /go/src/github.com/tinkerbell/hub/actions/go.sum
 WORKDIR /go/src/github.com/tinkerbell/hub/actions
 ENV GO111MODULE=on
+# To enable access to github repository, manually place GitHub token in actions/installation/docker/github/token
+# WARNING! Never commit/push GitHub token to remote repo!
+COPY installation/docker/github/token /root/github_token
+RUN git config --global url."https://$(cat /root/github_token):x-oauth-basic@github.com/".insteadOf "https://github.com/"
 RUN GOPRIVATE=github.com/tinkerbell/\*,github.com/platinasystems/\* go mod download
 WORKDIR /go/src/github.com/tinkerbell/hub/actions/image2disk/v1
 RUN --mount=type=cache,sharing=locked,id=gomod,target=/go/pkg/mod/cache \

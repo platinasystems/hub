@@ -34,7 +34,7 @@ type driveSelector struct {
 }
 
 func init() {
-	log2.InitWithDefault(nil)
+	log2.Init(nil, nil)
 
 	ps = &process.OSProcessService{}
 	fsRef = afero.NewOsFs()
